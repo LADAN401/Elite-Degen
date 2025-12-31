@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Elite Degen Bot - Base Token Scanner for Telegram
-Simplified working version
+Elite Degen Bot - Accurate Dex Paid Scanner
+Ready for Bothost deployment
 """
 
 import os
@@ -16,11 +16,12 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DEX_API = os.environ.get("DEXSCREENER_BASE_URL", "https://api.dexscreener.com")
 REF_URL = "https://t.me/based_eth_bot?start=r_Elite_xyz_b_"
 
-# Regex to detect token contract addresses
+# Detect token contract addresses
 CA_REGEX = re.compile(r"0x[a-fA-F0-9]{40}")
 
 # ---------------- HELPERS ----------------
 def fmt(n):
+    """Format numbers to 1.5K, 1.5M, 1.5B"""
     try:
         n = float(n)
     except:
@@ -32,6 +33,7 @@ def fmt(n):
     return f"{n:.1f}T"
 
 def ago(ts_ms):
+    """Convert timestamp to human-readable 'Xh ago' format"""
     seconds = int(datetime.utcnow().timestamp()*1000 - ts_ms) / 1000
     if seconds < 3600:
         return f"{int(seconds/60)}m"
@@ -47,16 +49,17 @@ def get_token_data(ca):
         pairs = r.get("pairs", [])
         if not pairs:
             return None
-        # Pick highest liquidity
+        # Pick pair with highest liquidity
         pairs.sort(key=lambda x: x.get("liquidity", {}).get("usd", 0), reverse=True)
         return pairs[0]
     except:
         return None
 
 def dex_paid_status(chain, ca):
+    """Check if token has paid for DexScreener listing"""
     try:
         r = requests.get(f"{DEX_API}/orders/v1/{chain}/{ca}", timeout=10).json()
-        if r:
+        if isinstance(r, list) and len(r) > 0:
             ts = r[0].get("createdAt")
             return f"🟢 Dex Paid ({ago(ts)} ago)" if ts else "🟢 Dex Paid"
     except:
@@ -74,7 +77,7 @@ async def scan_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid contract address. Please send a valid 0x... Base token CA.")
         return
     ca = ca_match.group(0)
-    
+
     token_data = get_token_data(ca)
     if not token_data:
         await update.message.reply_text("❌ Token not found on DexScreener")
@@ -91,7 +94,7 @@ async def scan_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lp = token_data.get("liquidity", {}).get("usd", 0)
     holders = token_data.get("holders", 0)
     created = token_data.get("pairCreatedAt", int(datetime.utcnow().timestamp()*1000))
-    
+
     paid_status = dex_paid_status(chain, ca)
 
     msg = (
@@ -173,4 +176,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main() 
