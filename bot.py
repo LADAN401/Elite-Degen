@@ -1,67 +1,61 @@
 #!/usr/bin/env python3
+"""
+Elite Degen Bot - Base Token Scanner for Telegram
+Simplified working version
+"""
+
 import os
-import time
 import re
 import requests
 from datetime import datetime
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEX = os.getenv("DEXSCREENER_BASE_URL", "https://api.dexscreener.com")
-REF = "https://t.me/based_eth_bot?start=r_Elite_xyz_b_"
+# ---------------- VARIABLES ----------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+DEX_API = os.environ.get("DEXSCREENER_BASE_URL", "https://api.dexscreener.com")
+REF_URL = "https://t.me/based_eth_bot?start=r_Elite_xyz_b_"
 
+# Regex to detect token contract addresses
 CA_REGEX = re.compile(r"0x[a-fA-F0-9]{40}")
 
 # ---------------- HELPERS ----------------
-
 def fmt(n):
     try:
         n = float(n)
     except:
         return "0"
-    for u in ["", "K", "M", "B"]:
+    for unit in ["", "K", "M", "B"]:
         if abs(n) < 1000:
-            return f"{n:.1f}{u}"
+            return f"{n:.1f}{unit}"
         n /= 1000
     return f"{n:.1f}T"
 
-def ago(ms):
-    s = int(time.time() - ms / 1000)
-    if s < 3600:
-        return f"{s//60}m"
-    if s < 86400:
-        return f"{s//3600}h"
-    return f"{s//86400}d"
+def ago(ts_ms):
+    seconds = int(datetime.utcnow().timestamp()*1000 - ts_ms) / 1000
+    if seconds < 3600:
+        return f"{int(seconds/60)}m"
+    if seconds < 86400:
+        return f"{int(seconds/3600)}h"
+    return f"{int(seconds/86400)}d"
 
-# ---------------- DEX DATA ----------------
-
-def dex_search(ca):
+# ---------------- DEX FUNCTIONS ----------------
+def get_token_data(ca):
+    """Fetch token info from DexScreener API"""
     try:
-        r = requests.get(f"{DEX}/latest/dex/search?q={ca}", timeout=10).json()
+        r = requests.get(f"{DEX_API}/latest/dex/search?q={ca}", timeout=10).json()
         pairs = r.get("pairs", [])
         if not pairs:
             return None
-        # Pick pair with highest liquidity
+        # Pick highest liquidity
         pairs.sort(key=lambda x: x.get("liquidity", {}).get("usd", 0), reverse=True)
         return pairs[0]
     except:
         return None
 
-def dex_paid(chain, ca):
+def dex_paid_status(chain, ca):
     try:
-        r = requests.get(f"{DEX}/orders/v1/{chain}/{ca}", timeout=10).json()
+        r = requests.get(f"{DEX_API}/orders/v1/{chain}/{ca}", timeout=10).json()
         if r:
             ts = r[0].get("createdAt")
             return f"🟢 Dex Paid ({ago(ts)} ago)" if ts else "🟢 Dex Paid"
@@ -69,164 +63,114 @@ def dex_paid(chain, ca):
         pass
     return "🔴 Dex Not Paid"
 
-def get_profile(ca):
-    banner = None
-    socials = []
-    try:
-        r = requests.get(f"{DEX}/token-profiles/latest/v1", timeout=10).json()
-        for x in r:
-            if x.get("tokenAddress", "").lower() == ca.lower():
-                banner = x.get("headerImage")
-                socials = x.get("links", [])
-                break
-    except:
-        pass
-    return banner, socials
+# ---------------- BOT HANDLERS ----------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🦅 Elite Degen Bot Online\nSend any Base token contract address to scan.")
 
-def is_cto(ca):
-    try:
-        r = requests.get(f"{DEX}/community-takeovers/latest/v1", timeout=10).json()
-        for x in r:
-            if x.get("tokenAddress", "").lower() == ca.lower():
-                return True
-    except:
-        pass
-    return False
-
-def boost_count(ca):
-    try:
-        r = requests.get(f"{DEX}/token-boosts/latest/v1", timeout=10).json()
-        return sum(1 for x in r if x.get("tokenAddress", "").lower() == ca.lower())
-    except:
-        return 0
-
-def get_token_details(chain, ca):
-    try:
-        r = requests.get(f"{DEX}/tokens/v1/{chain}/{ca}", timeout=10).json()
-        return r
-    except:
-        return {}
-
-def risk_score(lp, mc, paid, created, socials):
-    risks = []
-    if lp < 10000:
-        risks.append("Low liquidity")
-    if mc < lp*2:
-        risks.append("Low MC")
-    if "🔴" in paid:
-        risks.append("Dex Not Paid")
-    if int(time.time()*1000) - created < 2*3600*1000:
-        risks.append("Fresh token")
-    if not socials:
-        risks.append("No socials")
-    return risks if risks else ["Low risk"]
-
-def render_socials(links):
-    if not links:
-        return ""
-    out = "\n🔗 Socials\n └ "
-    items = []
-    for l in links:
-        t = l.get("type", "").upper()
-        u = l.get("url", "")
-        if t and u:
-            items.append(f"[{t}]({u})")
-    return out + " • ".join(items)
-
-# ---------------- SCAN CORE ----------------
-
-async def scan_and_send(ca, send):
-    pair = dex_search(ca)
-    if not pair:
-        await send("❌ Token not found on DexScreener")
+async def scan_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    ca_match = CA_REGEX.search(text)
+    if not ca_match:
+        await update.message.reply_text("❌ Invalid contract address. Please send a valid 0x... Base token CA.")
+        return
+    ca = ca_match.group(0)
+    
+    token_data = get_token_data(ca)
+    if not token_data:
+        await update.message.reply_text("❌ Token not found on DexScreener")
         return
 
-    chain = pair["chainId"]
-    dex = pair["dexId"]
-    token = pair["baseToken"]
+    chain = token_data.get("chainId", "base")
+    dex = token_data.get("dexId", "unknown")
+    token = token_data.get("baseToken", {})
     name = token.get("name", "")
-    sym = token.get("symbol", "")
-    price = float(pair.get("priceUsd", 0))
-    mc = float(pair.get("fdv", 0))
-    vol = float(pair.get("volume", {}).get("h24", 0))
-    lp = float(pair.get("liquidity", {}).get("usd", 0))
-    ch1h = pair.get("priceChange", {}).get("h1", 0)
-    created = pair.get("pairCreatedAt", int(time.time()*1000))
+    symbol = token.get("symbol", "")
+    price = token_data.get("priceUsd", 0)
+    mc = token_data.get("fdv", 0)
+    vol = token_data.get("volume", {}).get("h24", 0)
+    lp = token_data.get("liquidity", {}).get("usd", 0)
+    holders = token_data.get("holders", 0)
+    created = token_data.get("pairCreatedAt", int(datetime.utcnow().timestamp()*1000))
+    
+    paid_status = dex_paid_status(chain, ca)
 
-    paid = dex_paid(chain, ca)
-    banner, socials = get_profile(ca)
-    cto = "🤝 CTO Detected" if is_cto(ca) else ""
-    boosts = boost_count(ca)
-    details = get_token_details(chain, ca)
-    ath = details.get("allTimeHigh", {}).get("priceUsd", 0)
-    drawdown = ((price - ath)/ath*100) if ath else 0
-    risks = risk_score(lp, mc, paid, created, socials)
-
-    text = (
-        f"🔵 *{name}* (${sym})\n"
-        f"├ `{ca}`\n"
-        f"└ #{chain.upper()} ({dex}) | 🌱 {ago(created)} | 👁️ {pair.get('holders', '0')}\n\n"
+    msg = (
+        f"🔵 {name} (${symbol})\n"
+        f"├ {ca}\n"
+        f"└ #{chain.upper()} ({dex}) | 🌱 {ago(created)} | 👁️ {holders}\n\n"
         f"📊 Stats\n"
         f" ├ USD   ${price}\n"
         f" ├ MC    {fmt(mc)}\n"
         f" ├ Vol   {fmt(vol)}\n"
-        f" ├ LP    {fmt(lp)}\n"
-        f" ├ 1H    {ch1h}%\n"
-        f" └ ATH   ${ath} ({drawdown:.1f}% drawdown)\n\n"
+        f" ├ LP    {fmt(lp)}\n\n"
         f"🔒 Security\n"
-        f" ├ {paid}\n"
-        f" ├ Boosts     {boosts}\n"
-        f" ├ Risk      {' + '.join(risks)}\n"
+        f" ├ {paid_status}\n\n"
+        f"🦅 Elite Degen Scanner"
     )
-    if cto:
-        text += f" ├ {cto}\n"
-    text += render_socials(socials)
-    text += "\n\n🦅 Elite Degen Scanner"
 
     kb = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔄 Refresh", callback_data=f"r|{ca}"),
-            InlineKeyboardButton("🟢 Buy with BaseBot", url=f"{REF}{ca}")
+            InlineKeyboardButton("🟢 Buy with BaseBot", url=f"{REF_URL}{ca}")
         ]
     ])
 
-    if banner:
-        await send(banner)
-    await send(text, kb)
-
-# ---------------- TELEGRAM ----------------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🦅 Elite Degen Online\nSend any token CA")
-
-async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    found = CA_REGEX.findall(update.message.text)
-    if found:
-        ca = found[0]
-        await scan_and_send(
-            ca,
-            lambda m, k=None: update.message.reply_text(
-                m, parse_mode="Markdown", reply_markup=k
-            )
-        )
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
 
 async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    ca = q.data.split("|")[1]
-    await scan_and_send(
-        ca,
-        lambda m, k=None: q.edit_message_text(
-            m, parse_mode="Markdown", reply_markup=k
-        )
+    query = update.callback_query
+    await query.answer()
+    ca = query.data.split("|")[1]
+    token_data = get_token_data(ca)
+    if not token_data:
+        await query.edit_message_text("❌ Token not found on DexScreener")
+        return
+
+    chain = token_data.get("chainId", "base")
+    dex = token_data.get("dexId", "unknown")
+    token = token_data.get("baseToken", {})
+    name = token.get("name", "")
+    symbol = token.get("symbol", "")
+    price = token_data.get("priceUsd", 0)
+    mc = token_data.get("fdv", 0)
+    vol = token_data.get("volume", {}).get("h24", 0)
+    lp = token_data.get("liquidity", {}).get("usd", 0)
+    holders = token_data.get("holders", 0)
+    created = token_data.get("pairCreatedAt", int(datetime.utcnow().timestamp()*1000))
+
+    paid_status = dex_paid_status(chain, ca)
+
+    msg = (
+        f"🔵 {name} (${symbol})\n"
+        f"├ {ca}\n"
+        f"└ #{chain.upper()} ({dex}) | 🌱 {ago(created)} | 👁️ {holders}\n\n"
+        f"📊 Stats\n"
+        f" ├ USD   ${price}\n"
+        f" ├ MC    {fmt(mc)}\n"
+        f" ├ Vol   {fmt(vol)}\n"
+        f" ├ LP    {fmt(lp)}\n\n"
+        f"🔒 Security\n"
+        f" ├ {paid_status}\n\n"
+        f"🦅 Elite Degen Scanner"
     )
 
-# ---------------- RUN ----------------
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"r|{ca}"),
+            InlineKeyboardButton("🟢 Buy with BaseBot", url=f"{REF_URL}{ca}")
+        ]
+    ])
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message))
-app.add_handler(CallbackQueryHandler(refresh, pattern="^r\\|"))
+    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=kb)
 
-print("🦅 Elite Degen Bot LIVE")
-app.run_polling()
+# ---------------- MAIN ----------------
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, scan_token))
+    app.add_handler(CallbackQueryHandler(refresh, pattern="^r\\|"))
+    print("🦅 Elite Degen Bot Running")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
