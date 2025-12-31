@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
 Elite Degen Bot - Token Scanner + Wallet Tracker
-Features:
-1. Token scanning with DexScreener data
-2. Dex Paid status, social links, banners
-3. Wallet tracking with instant alerts
-4. BaseBot referral link integration
-Deployment ready for Bothost
+Deployment-ready for Bothost
 """
 
 import os
@@ -18,13 +13,13 @@ from datetime import datetime
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+    ApplicationBuilder, CommandHandler, ContextTypes
 )
 from websockets import connect
 
-# -------------------- CONFIG --------------------
+# ---------------- CONFIG ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ALCHEMY_WS = os.environ.get("ALCHEMY_API")  # wss://base-mainnet.g.alchemy.com/v2/KEY
+ALCHEMY_WS = os.environ.get("ALCHEMY_API")  # Must be wss://... for WebSocket
 DEXSCREENER_API = os.environ.get("DEXSCREENER_BASE_URL", "https://api.dexscreener.com")
 REF_BASEBOT = "https://t.me/based_eth_bot?start=r_Elite_xyz_b_"
 
@@ -36,12 +31,11 @@ logger = logging.getLogger(__name__)
 WALLET_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
 TOKEN_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
-# In-memory storage
+# In-memory wallet tracking
 tracked_wallets = {}  # { user_id: [ {"address": "...", "nickname": "..."} ] }
 
-# -------------------- HELPERS --------------------
+# ---------------- HELPERS ----------------
 def format_number(n):
-    """Convert numbers to 1.5K / 2.3M / 1.2B style"""
     try:
         n = float(n)
     except:
@@ -56,7 +50,6 @@ def format_number(n):
         return str(n)
 
 def get_dexscreener_token_info(token_address):
-    """Fetch token info from DexScreener"""
     try:
         url = f"{DEXSCREENER_API}/tokens/v1/base/{token_address}"
         resp = requests.get(url, timeout=10)
@@ -66,12 +59,10 @@ def get_dexscreener_token_info(token_address):
         return {}
 
 def get_dex_paid_status(token_address):
-    """Check Dex paid orders"""
     try:
         url = f"{DEXSCREENER_API}/orders/v1/base/{token_address}"
         resp = requests.get(url, timeout=10)
         data = resp.json()
-        # Check if any order shows paid
         for order in data.get("orders", []):
             if order.get("paid"):
                 ts = order.get("timestamp")
@@ -83,7 +74,7 @@ def get_dex_paid_status(token_address):
     except:
         return "❌ API Error"
 
-# -------------------- TELEGRAM HANDLERS --------------------
+# ---------------- TELEGRAM HANDLERS ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🦅 Elite Degen Bot Online!\n"
@@ -95,7 +86,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def scan_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Scan token and show info"""
     msg = update.message.text.strip().split()
     if len(msg) < 2:
         return await update.message.reply_text("Usage: /scan <token_address>")
@@ -117,28 +107,22 @@ async def scan_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     dex_paid = get_dex_paid_status(token_address)
 
-    # Format message
     text = ""
     if banner:
         text += f"{banner}\n"
     text += f"🦅 ELITE DEGEN SCAN\n"
     text += f"Token: {name} ({symbol})\n"
-    text += f"Price: ${float(price):.8f}\n"
-    text += f"MC: {format_number(mc)}\nLiquidity: {format_number(liquidity)}\nHolders: {format_number(holders)}\n"
+    text += f"Price: ${float(price):.8f}\nMC: {format_number(mc)}\nLiquidity: {format_number(liquidity)}\nHolders: {format_number(holders)}\n"
     text += f"{dex_paid}\n"
 
-    # Inline button
     keyboard = [[InlineKeyboardButton("Buy with BaseBot", url=REF_BASEBOT + token_address)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
 async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add wallet to tracking"""
     msg = update.message.text.strip().split()
     if len(msg) < 2:
         return await update.message.reply_text("Usage: /add <wallet> <nickname>")
-
     wallet = msg[1].lower()
     nickname = " ".join(msg[2:]) if len(msg) > 2 else wallet[:6]
 
@@ -174,9 +158,8 @@ async def list_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"• {w['nickname']}: {w['address']}\n"
     await update.message.reply_text(msg)
 
-# -------------------- WEBSOCKET LISTENER --------------------
+# ---------------- WEBSOCKET ----------------
 async def alchemy_listener(application):
-    """Listen to all pending transactions on Base via Alchemy WS"""
     subscribe_payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -194,7 +177,6 @@ async def alchemy_listener(application):
                 tx = data.get("params", {}).get("result")
                 if not tx:
                     continue
-
                 frm = tx.get("from", "").lower()
                 to = tx.get("to", "").lower()
 
@@ -203,30 +185,26 @@ async def alchemy_listener(application):
                         addr = w["address"]
                         if frm == addr or to == addr:
                             await send_wallet_alert(application, uid, tx, w)
-
             except Exception as e:
                 logger.error(f"WS parse error: {e}")
 
 async def send_wallet_alert(application, user_id, tx, wallet_obj):
-    """Format and send wallet transaction alert"""
     tx_hash = tx.get("hash")
     frm = tx.get("from")
     to = tx.get("to")
-
     msg = (
         f"#{wallet_obj['nickname']}\n"
         f"🟢 New Tx detected!\n"
         f"Tx: {tx_hash}\nFrom: {frm}\nTo: {to}\n"
         f"View: https://base.etherscan.io/tx/{tx_hash}"
     )
-
     try:
         await application.bot.send_message(chat_id=user_id, text=msg)
     except Exception as e:
         logger.error(f"Failed to send wallet alert: {e}")
 
-# -------------------- MAIN --------------------
-def main():
+# ---------------- MAIN ----------------
+async def main_async():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_cmd))
@@ -235,12 +213,12 @@ def main():
     app.add_handler(CommandHandler("remove", remove_wallet))
     app.add_handler(CommandHandler("list", list_wallets))
 
-    # Run WebSocket listener in background
-    asyncio.get_event_loop().create_task(alchemy_listener(app))
+    # Start WebSocket listener in background
+    asyncio.create_task(alchemy_listener(app))
 
-    # Start bot
-    logger.info("Elite Degen Bot running...")
-    app.run_polling()
+    # Run bot
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main_async()) 
